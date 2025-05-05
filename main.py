@@ -11,6 +11,7 @@ from flask import Flask
 import socket
 from threading import Lock
 import atexit
+from time import sleep
 
 # Logging configuration
 logging.basicConfig(
@@ -37,23 +38,29 @@ bot = telebot.TeleBot(
 # Maintenance mode flag
 maintenance_mode = False
 
-# Signal handlers for graceful shutdown
-def shutdown_handler(signum, frame):
+# Graceful shutdown logic
+def graceful_shutdown(signum=None, frame=None):
+    """Emergency cleanup with logging"""
+    print("🛑 Received shutdown signal" + (" SIGTERM" if signum == signal.SIGTERM else 
+                                           " SIGINT" if signum == signal.SIGINT else ""))
     logger.info("Shutting down bot gracefully...")
     try:
-        bot.stop_polling()
-        logger.info("Stopped bot polling.")
+        if hasattr(bot, 'stop_polling'):
+            bot.stop_polling()
+            logger.info("Stopped bot polling.")
         database.cancel_all_timers()
         logger.info("Canceled all timers.")
-        # Explicitly close SQLite connections if needed
-        logger.info("Shutdown complete.")
+        # Add additional cleanup logic here if needed
+        logger.info("✅ Resources released")
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
     finally:
-        sys.exit(0)
+        sys.exit(0 if signum else 1)  # Clean exit for signals
 
-signal.signal(signal.SIGINT, shutdown_handler)
-signal.signal(signal.SIGTERM, shutdown_handler)
+# Register shutdown handlers
+atexit.register(graceful_shutdown)
+signal.signal(signal.SIGTERM, graceful_shutdown)  # Render termination
+signal.signal(signal.SIGINT, graceful_shutdown)   # Ctrl+C
 
 # Flask web server to satisfy Render's port requirement
 app = Flask(__name__)
@@ -140,24 +147,18 @@ def complete_task(call):
         logger.error(f"Error completing task: {e}")
         bot.answer_callback_query(call.id, "An error occurred while completing the task. Please try again.")
 
-# Cleanup on exit
-@atexit.register
-def cleanup():
-    logger.info("Shutting down gracefully...")
-
-# Start bot with port-based instance locking
+# Start bot with protected execution block
 if __name__ == "__main__":
     try:
-        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        lock_socket.bind(('127.0.0.1', 47200))  # Random unused port
-        logger.info("✅ Acquired instance lock - starting bot")
-        print("Bot running...")
-        bot.infinity_polling()
-    except socket.error:
-        logger.error("🛑 Another bot instance is already running!")
-        sys.exit(1)
+        print(f"🚀 Starting bot instance (PID: {os.getpid()})")
+        bot.infinity_polling(
+            restart_on_change=True,  # Auto-recover from API errors
+            timeout=20               # Faster reconnect
+        )
+    except Exception as e:
+        print(f"💥 Crash detected: {str(e)[:100]}...")
+        graceful_shutdown()
     finally:
-        try:
-            lock_socket.close()
-        except:
-            pass
+        print("🔁 Attempting self-recovery...")
+        sleep(5)
+        os.execv(sys.executable, ['python'] + sys.argv)  # Auto-restart
