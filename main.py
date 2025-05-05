@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import os
 import signal
 import sys
+from flask import Flask
 
 # Logging configuration
 logging.basicConfig(
@@ -48,6 +49,20 @@ def shutdown_handler(signum, frame):
 
 signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
+
+# Flask web server to satisfy Render's port requirement
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running"
+
+# Start Flask in a separate thread
+threading.Thread(
+    target=app.run,
+    kwargs={'host': '0.0.0.0', 'port': 10000},
+    daemon=True
+).start()
 
 # Check if user is admin
 def is_admin(chat_id, user_id):
