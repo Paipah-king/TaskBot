@@ -1,0 +1,16 @@
+# Exclude environment variables
+.env
+
+# Exclude SQLite database file
+bot_data.db
+
+# Exclude log files
+bot.log
+
+# Exclude Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Exclude VS Code settings
+.vscode/
