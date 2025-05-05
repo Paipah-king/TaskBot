@@ -8,6 +8,9 @@ import os
 import signal
 import sys
 from flask import Flask
+import socket
+from threading import Lock
+import atexit
 
 # Logging configuration
 logging.basicConfig(
@@ -24,10 +27,12 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Initialize bot with your token from .env
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN is not set in the .env file.")
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(
+    os.getenv('BOT_TOKEN'),  # Keeps current .env loading
+    threaded=False,          # Disables internal threading
+    skip_pending=True,       # Ignores queued messages
+    num_threads=1            # Explicit single thread
+)
 
 # Maintenance mode flag
 maintenance_mode = False
@@ -135,12 +140,24 @@ def complete_task(call):
         logger.error(f"Error completing task: {e}")
         bot.answer_callback_query(call.id, "An error occurred while completing the task. Please try again.")
 
-# Start bot
+# Cleanup on exit
+@atexit.register
+def cleanup():
+    logger.info("Shutting down gracefully...")
+
+# Start bot with port-based instance locking
 if __name__ == "__main__":
     try:
-        logger.info("Bot starting...")
+        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        lock_socket.bind(('127.0.0.1', 47200))  # Random unused port
+        logger.info("✅ Acquired instance lock - starting bot")
         print("Bot running...")
         bot.infinity_polling()
-    except Exception as e:
-        logger.error(f"Polling error: {e}")
-        shutdown_handler(None, None)
+    except socket.error:
+        logger.error("🛑 Another bot instance is already running!")
+        sys.exit(1)
+    finally:
+        try:
+            lock_socket.close()
+        except:
+            pass
