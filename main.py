@@ -7,11 +7,10 @@ from dotenv import load_dotenv
 import os
 import signal
 import sys
-from flask import Flask
 import socket
-from threading import Lock
-import atexit
-from time import sleep
+import time
+from threading import Thread
+from flask import Flask
 
 # Logging configuration
 logging.basicConfig(
@@ -27,12 +26,36 @@ logger = logging.getLogger(__name__)
 # Load environment variables from .env file
 load_dotenv()
 
+# PORT MANAGEMENT SOLUTION
+def find_available_port(start_port=10000):
+    """Find first available port"""
+    port = start_port
+    while True:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(('0.0.0.0', port))
+            sock.close()
+            return port
+        except OSError:
+            port += 1
+
+# SAFE FLASK SERVER SETUP
+flask_port = find_available_port()
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health_check():
+    return "Bot Operational"
+
+def run_flask():
+    flask_app.run(host='0.0.0.0', port=flask_port)
+
 # Initialize bot with your token from .env
 bot = telebot.TeleBot(
-    os.getenv('BOT_TOKEN'),  # Keeps current .env loading
-    threaded=False,          # Disables internal threading
-    skip_pending=True,       # Ignores queued messages
-    num_threads=1            # Explicit single thread
+    os.getenv('BOT_TOKEN'),
+    threaded=False,
+    skip_pending=True,
+    num_threads=1
 )
 
 # Maintenance mode flag
@@ -50,7 +73,6 @@ def graceful_shutdown(signum=None, frame=None):
             logger.info("Stopped bot polling.")
         database.cancel_all_timers()
         logger.info("Canceled all timers.")
-        # Add additional cleanup logic here if needed
         logger.info("✅ Resources released")
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
@@ -61,20 +83,6 @@ def graceful_shutdown(signum=None, frame=None):
 atexit.register(graceful_shutdown)
 signal.signal(signal.SIGTERM, graceful_shutdown)  # Render termination
 signal.signal(signal.SIGINT, graceful_shutdown)   # Ctrl+C
-
-# Flask web server to satisfy Render's port requirement
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is running"
-
-# Start Flask in a separate thread
-threading.Thread(
-    target=app.run,
-    kwargs={'host': '0.0.0.0', 'port': 10000},
-    daemon=True
-).start()
 
 # Check if user is admin
 def is_admin(chat_id, user_id):
@@ -147,18 +155,28 @@ def complete_task(call):
         logger.error(f"Error completing task: {e}")
         bot.answer_callback_query(call.id, "An error occurred while completing the task. Please try again.")
 
-# Start bot with protected execution block
-if __name__ == "__main__":
+# STABLE POLLING WITH RECOVERY
+def start_bot():
     try:
-        print(f"🚀 Starting bot instance (PID: {os.getpid()})")
+        print(f"🤖 Bot starting on PID {os.getpid()}")
         bot.infinity_polling(
-            restart_on_change=True,  # Auto-recover from API errors
-            timeout=20               # Faster reconnect
+            timeout=20,
+            long_polling_timeout=10,
+            restart_on_change=False  # Disabled until watchdog installed
         )
     except Exception as e:
-        print(f"💥 Crash detected: {str(e)[:100]}...")
-        graceful_shutdown()
-    finally:
-        print("🔁 Attempting self-recovery...")
-        sleep(5)
-        os.execv(sys.executable, ['python'] + sys.argv)  # Auto-restart
+        print(f"🔴 Bot crashed: {str(e)[:200]}")
+        time.sleep(5)
+        os.execv(sys.executable, ['python'] + sys.argv)
+
+# DEPENDENCY HANDLING
+try:
+    import watchdog  # Only check if available
+    bot.infinity_polling = lambda: bot.infinity_polling(restart_on_change=True)
+except ImportError:
+    print("⚠️ Watchdog not installed - automatic restart disabled")
+
+# MAIN EXECUTION BLOCK
+if __name__ == '__main__':
+    Thread(target=run_flask, daemon=True).start()
+    start_bot()
