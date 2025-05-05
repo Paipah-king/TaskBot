@@ -58,11 +58,13 @@ load_dotenv()
 # Initialize bot with your token from .env
 bot = telebot.TeleBot(
     os.getenv('BOT_TOKEN'),
-    threaded=True,  # Now safe with locks
+    threaded=True,  # Required for background polling
     skip_pending=True,
-    num_threads=1,  # Critical for free tier
-    suppress_threading_exception=True
+    num_threads=1  # Ensures single-threaded operation
 )
+
+# Prevent thread exception propagation
+bot._exceptions_queue = None
 
 # Flask app for health check
 app = Flask(__name__)
