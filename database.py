@@ -2,6 +2,7 @@ import sqlite3
 import time
 import logging
 import threading
+import os
 
 # Logging configuration
 logging.basicConfig(
@@ -14,14 +15,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Track active database connections
+active_connections = []
+
 # SQLite connection setup
 def get_connection():
     try:
-        conn = sqlite3.connect('bot_data.db', check_same_thread=False)
+        db_path = os.getenv('DATABASE_URL', 'bot_data.db')  # Use Render's DATABASE_URL if available
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        active_connections.append(conn)  # Track connections
         return conn
     except sqlite3.Error as e:
         logger.error(f"Database connection error: {e}")
         raise
+
+def close_all_connections():
+    """Close all active database connections."""
+    for conn in active_connections:
+        try:
+            conn.close()
+        except Exception as e:
+            logger.warning(f"Failed to close connection: {e}")
+    logger.info(f"Closed {len(active_connections)} DB connections")
+    active_connections.clear()
 
 # Initialize database and tables
 def initialize_database():
@@ -107,5 +123,3 @@ def cancel_all_timers():
 
 # Initialize the database when the module is imported
 initialize_database()
-
-# Required dependencies should be listed in a requirements.txt file, not in the Python script.

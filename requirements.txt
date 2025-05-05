@@ -1,3 +1,5 @@
 pyTelegramBotAPI>=4.0.0
 python-dotenv
-Flask
+flask>=2.0.0
+requests>=2.28.0
+Werkzeug==2.3.7  # Explicitly pin for reloader detection
