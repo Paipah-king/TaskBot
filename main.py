@@ -1,16 +1,13 @@
-import logging
-import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import threading
-import database
-from dotenv import load_dotenv
 import os
-import signal
 import sys
+import atexit
+import signal
 import socket
-import time
+import logging
 from threading import Thread
 from flask import Flask
+import telebot
+from dotenv import load_dotenv
 
 # Logging configuration
 logging.basicConfig(
@@ -26,63 +23,47 @@ logger = logging.getLogger(__name__)
 # Load environment variables from .env file
 load_dotenv()
 
-# PORT MANAGEMENT SOLUTION
-def find_available_port(start_port=10000):
-    """Find first available port"""
-    port = start_port
-    while True:
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.bind(('0.0.0.0', port))
-            sock.close()
-            return port
-        except OSError:
-            port += 1
-
-# SAFE FLASK SERVER SETUP
-flask_port = find_available_port()
+# Flask health check setup
 flask_app = Flask(__name__)
+PORT = 10000  # Starting port
+
+def find_available_port():
+    """Find open port starting from PORT"""
+    global PORT
+    with socket.socket() as s:
+        while PORT < 10100:
+            try:
+                s.bind(('0.0.0.0', PORT))
+                return PORT
+            except OSError:
+                PORT += 1
+        raise RuntimeError("No available ports")
 
 @flask_app.route('/')
 def health_check():
-    return "Bot Operational"
-
-def run_flask():
-    flask_app.run(host='0.0.0.0', port=flask_port)
-
-# Initialize bot with your token from .env
-bot = telebot.TeleBot(
-    os.getenv('BOT_TOKEN'),
-    threaded=False,
-    skip_pending=True,
-    num_threads=1
-)
-
-# Maintenance mode flag
-maintenance_mode = False
+    return "🟢 Bot Operational", 200
 
 # Graceful shutdown logic
 def graceful_shutdown(signum=None, frame=None):
-    """Emergency cleanup with logging"""
-    print("🛑 Received shutdown signal" + (" SIGTERM" if signum == signal.SIGTERM else 
-                                           " SIGINT" if signum == signal.SIGINT else ""))
-    logger.info("Shutting down bot gracefully...")
+    """Handle all shutdown scenarios"""
+    logger.info(f"Shutting down ({'SIGTERM' if signum == signal.SIGTERM else 'SIGINT' if signum else 'manual'})")
     try:
         if hasattr(bot, 'stop_polling'):
             bot.stop_polling()
             logger.info("Stopped bot polling.")
-        database.cancel_all_timers()
-        logger.info("Canceled all timers.")
         logger.info("✅ Resources released")
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
     finally:
-        sys.exit(0 if signum else 1)  # Clean exit for signals
+        sys.exit(0)
 
-# Register shutdown handlers
-atexit.register(graceful_shutdown)
-signal.signal(signal.SIGTERM, graceful_shutdown)  # Render termination
-signal.signal(signal.SIGINT, graceful_shutdown)   # Ctrl+C
+# Initialize bot with your token from .env
+bot = telebot.TeleBot(
+    os.getenv('BOT_TOKEN'),  # Keep .env loading
+    threaded=False,
+    skip_pending=True,
+    num_threads=1
+)
 
 # Check if user is admin
 def is_admin(chat_id, user_id):
@@ -96,9 +77,6 @@ def is_admin(chat_id, user_id):
 # Greet new members
 @bot.message_handler(content_types=['new_chat_members'])
 def greet_new_member(message):
-    if maintenance_mode:
-        bot.send_message(message.chat.id, "The bot is currently in maintenance mode. Please try again later.")
-        return
     for user in message.new_chat_members:
         bot.send_message(
             message.chat.id,
@@ -118,9 +96,6 @@ def process_kick(chat_id, user_id):
 # Verify users
 @bot.message_handler(regexp='I am here')
 def verify_user(message):
-    if maintenance_mode:
-        bot.reply_to(message, "The bot is currently in maintenance mode. Please try again later.")
-        return
     user_id = message.from_user.id
     group_id = message.chat.id
     try:
@@ -136,9 +111,6 @@ def verify_user(message):
 # Handle task completion
 @bot.callback_query_handler(func=lambda call: call.data.startswith('complete_'))
 def complete_task(call):
-    if maintenance_mode:
-        bot.answer_callback_query(call.id, "The bot is currently in maintenance mode. Please try again later.")
-        return
     user_id = call.from_user.id
     if not database.is_verified(user_id, call.message.chat.id):
         bot.answer_callback_query(call.id, "Verify first with 'I am here'.")
@@ -155,28 +127,25 @@ def complete_task(call):
         logger.error(f"Error completing task: {e}")
         bot.answer_callback_query(call.id, "An error occurred while completing the task. Please try again.")
 
-# STABLE POLLING WITH RECOVERY
-def start_bot():
-    try:
-        print(f"🤖 Bot starting on PID {os.getpid()}")
-        bot.infinity_polling(
-            timeout=20,
-            long_polling_timeout=10,
-            restart_on_change=False  # Disabled until watchdog installed
-        )
-    except Exception as e:
-        print(f"🔴 Bot crashed: {str(e)[:200]}")
-        time.sleep(5)
-        os.execv(sys.executable, ['python'] + sys.argv)
-
-# DEPENDENCY HANDLING
-try:
-    import watchdog  # Only check if available
-    bot.infinity_polling = lambda: bot.infinity_polling(restart_on_change=True)
-except ImportError:
-    print("⚠️ Watchdog not installed - automatic restart disabled")
-
-# MAIN EXECUTION BLOCK
+# Main execution block
 if __name__ == '__main__':
-    Thread(target=run_flask, daemon=True).start()
-    start_bot()
+    # Register shutdown handlers
+    atexit.register(graceful_shutdown)
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    signal.signal(signal.SIGINT, graceful_shutdown)
+
+    # Start Flask in background
+    flask_port = find_available_port()
+    Thread(
+        target=flask_app.run,
+        kwargs={'host': '0.0.0.0', 'port': flask_port},
+        daemon=True
+    ).start()
+
+    # Start bot with crash protection
+    try:
+        logger.info(f"🚀 Starting bot (PID: {os.getpid()})")
+        bot.infinity_polling()
+    except Exception as e:
+        logger.error(f"💥 Fatal error: {str(e)[:200]}")
+        graceful_shutdown()
