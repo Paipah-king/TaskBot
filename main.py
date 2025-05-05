@@ -1,5 +1,8 @@
 import os
 import sys
+import time
+import socket
+import fcntl  # For file-based locking (POSIX systems)
 import atexit
 import signal
 import logging
@@ -9,9 +12,34 @@ from dotenv import load_dotenv
 import database
 from flask import Flask
 from threading import Thread, Event, Lock
-import time
-import socket
 from werkzeug.serving import is_running_from_reloader  # Prevent duplicate threads
+
+# 1. KILL ANY PREVIOUS INSTANCE (Render-specific)
+def kill_previous():
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('localhost', 47200))  # Same port in all instances
+        return True
+    except socket.error:
+        print("⚠️ Another instance running - waiting...")
+        time.sleep(10)  # Wait for Render to clean up
+        sys.exit(1)  # Force restart
+
+kill_previous()
+
+# 2. TELEGRAM BOT LOCK (Critical)
+BOT_LOCK_FILE = "/tmp/bot.lock"
+
+def acquire_bot_lock():
+    try:
+        fd = os.open(BOT_LOCK_FILE, os.O_CREAT | os.O_WRONLY)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fd
+    except (IOError, OSError):
+        print("🚨 Bot already running elsewhere - exiting")
+        sys.exit(1)
+
+lock_fd = acquire_bot_lock()
 
 # Logging configuration
 logging.basicConfig(
@@ -30,8 +58,10 @@ load_dotenv()
 # Initialize bot with your token from .env
 bot = telebot.TeleBot(
     os.getenv('BOT_TOKEN'),
-    threaded=False,
-    skip_pending=True
+    threaded=True,  # Now safe with locks
+    skip_pending=True,
+    num_threads=1,  # Critical for free tier
+    suppress_threading_exception=True
 )
 
 # Flask app for health check
@@ -69,11 +99,22 @@ def keep_alive():
 
 # Graceful shutdown handler
 def shutdown():
+    """Graceful shutdown handler."""
     logger.info("🚦 Shutting down gracefully...")
     stop_event.set()  # Signal threads to stop
     try:
+        # Stop bot polling
+        bot.stop_polling()
+        logger.info("🛑 Stopped bot polling.")
+
+        # Release the bot lock file
+        if 'lock_fd' in globals():
+            os.close(lock_fd)
+            os.unlink(BOT_LOCK_FILE)
+            logger.info("🔓 Released bot lock file.")
+
+        # Stop background threads
         if bot_thread and bot_thread.is_alive():
-            bot.stop_polling()
             bot_thread.join()
             logger.info("🛑 Stopped bot polling thread.")
         
@@ -85,7 +126,7 @@ def shutdown():
         database.close_all_connections()
         logger.info("✅ Closed all database connections.")
     except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
+        logger.error(f"Shutdown error: {e}")
     finally:
         sys.exit(0)
 
